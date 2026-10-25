@@ -1,0 +1,69 @@
+name: Sync upstream
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: automation
+          fetch-depth: 1
+          sparse-checkout: .github
+
+      - name: Keepalive
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $((45*86400)) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "keepalive"
+            git push
+          fi
+
+      - name: Sync
+        id: sync
+        run: |
+          OLD=$(gh api repos/$REPO/branches/master --jq .commit.sha)
+          gh repo sync $REPO --source torvalds/linux --branch master --force
+          NEW=$(gh api repos/$REPO/branches/master --jq .commit.sha)
+          echo "old=$OLD" >> $GITHUB_OUTPUT
+          echo "new=$NEW" >> $GITHUB_OUTPUT
+
+      - name: Collect commits
+        if: steps.sync.outputs.old != steps.sync.outputs.new
+        run: |
+          gh api "repos/$REPO/compare/${{ steps.sync.outputs.old }}...${{ steps.sync.outputs.new }}" --paginate > raw.json
+          jq -r '.commits[].commit.message | split("\n")[0]' raw.json > titles.txt
+          jq -r '.commits[].commit.message, "-----"' raw.json | head -c 60000 > messages.txt
+
+      - name: Summarize
+        if: steps.sync.outputs.old != steps.sync.outputs.new
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude -p "The following is a list of new Linux kernel commit messages. Concisely summarize what changed and why, grouped by subsystem, in English, within 10 lines." < messages.txt > summary.md
+
+      - name: Notify
+        if: steps.sync.outputs.old != steps.sync.outputs.new
+        run: |
+          {
+            echo "@${{ github.repository_owner }}"
+            echo
+            cat summary.md
+            echo
+            echo "<details><summary>Commits ($(wc -l < titles.txt))</summary>"
+            echo
+            head -n 200 titles.txt
+            echo "</details>"
+          } > body.md
+          gh issue create --repo $REPO --title "Linux updated: ${{ steps.sync.outputs.new }}" --body-file body.md
