@@ -5,7 +5,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
-  issues: write
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -61,19 +60,42 @@ jobs:
 
       - name: Notify
         if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          OLD: ${{ steps.sync.outputs.old }}
+          NEW: ${{ steps.sync.outputs.new }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          count=$(wc -l < titles.txt)
+          subject="Linux updated: ${NEW:0:12} ($count commits)"
           {
-            echo "@${{ github.repository_owner }}"
+            echo "From: Linux sync <$MAIL_FROM>"
+            echo "To: $MAIL_TO"
+            echo "Subject: =?UTF-8?B?$(printf '%s' "$subject" | base64 -w0)?="
+            echo "Date: $(date -R)"
+            echo "Message-ID: <$NEW.${{ github.run_id }}@${MAIL_FROM#*@}>"
+            echo "MIME-Version: 1.0"
+            echo "Content-Type: text/plain; charset=UTF-8"
+            echo "Content-Transfer-Encoding: 8bit"
             echo
             if [ "${{ steps.summarize.outcome }}" = "success" ]; then
               cat summary.md
             else
-              echo "> Summary failed. See ${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}"
+              echo "Summary failed. See $RUN_URL"
             fi
             echo
-            echo "<details><summary>Commits ($(wc -l < titles.txt))</summary>"
+            echo "Diff: ${{ github.server_url }}/$REPO/compare/$OLD...$NEW"
             echo
-            head -n 200 titles.txt
-            echo "</details>"
-          } > body.md
-          gh issue create --repo $REPO --title "Linux updated: ${{ steps.sync.outputs.new }}" --body-file body.md
+            echo "Commits ($count):"
+            head -n 200 titles.txt | sed 's/^/- /'
+          } > mail.eml
+          if [ "$SMTP_PORT" = "465" ]; then url="smtps://$SMTP_HOST:465"; else url="smtp://$SMTP_HOST:${SMTP_PORT:-587}"; fi
+          curl --silent --show-error --ssl-reqd --crlf --url "$url" \
+            --user "$SMTP_USERNAME:$SMTP_PASSWORD" \
+            --mail-from "$MAIL_FROM" --mail-rcpt "$MAIL_TO" \
+            --upload-file mail.eml
