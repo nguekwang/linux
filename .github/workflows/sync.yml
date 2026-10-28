@@ -5,7 +5,6 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
-  issues: write
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -61,19 +60,29 @@ jobs:
 
       - name: Notify
         if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
+        env:
+          OLD: ${{ steps.sync.outputs.old }}
+          NEW: ${{ steps.sync.outputs.new }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          count=$(wc -l < titles.txt)
+          tag="sync-$(date -u +%Y%m%d-%H%M)"
           {
-            echo "@${{ github.repository_owner }}"
-            echo
             if [ "${{ steps.summarize.outcome }}" = "success" ]; then
               cat summary.md
             else
-              echo "> Summary failed. See ${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}"
+              echo "> Summary failed. See $RUN_URL"
             fi
             echo
-            echo "<details><summary>Commits ($(wc -l < titles.txt))</summary>"
+            echo "Diff: ${{ github.server_url }}/$REPO/compare/$OLD...$NEW"
             echo
+            echo "<details><summary>Commits ($count)</summary>"
+            echo
+            # Code block so names in commit titles never become @mentions
+            echo '```text'
             head -n 200 titles.txt
+            echo '```'
             echo "</details>"
           } > body.md
-          gh issue create --repo $REPO --title "Linux updated: ${{ steps.sync.outputs.new }}" --body-file body.md
+          gh release create "$tag" --repo "$REPO" --target "$NEW" \
+            --title "Linux updated: ${NEW:0:12} ($count commits)" --notes-file body.md
