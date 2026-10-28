@@ -13,7 +13,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: automation
           fetch-depth: 1
@@ -39,6 +39,7 @@ jobs:
           echo "new=$NEW" >> $GITHUB_OUTPUT
 
       - name: Collect commits
+        id: collect
         if: steps.sync.outputs.old != steps.sync.outputs.new
         run: |
           gh api "repos/$REPO/compare/${{ steps.sync.outputs.old }}...${{ steps.sync.outputs.new }}" --paginate > raw.json
@@ -46,20 +47,29 @@ jobs:
           jq -r '.commits[].commit.message, "-----"' raw.json | head -c 60000 > messages.txt
 
       - name: Summarize
+        id: summarize
         if: steps.sync.outputs.old != steps.sync.outputs.new
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           npm install -g @anthropic-ai/claude-code
-          claude -p "The following is a list of new Linux kernel commit messages. Concisely summarize what changed and why, grouped by subsystem, in English, within 10 lines." < messages.txt > summary.md
+          if ! claude -p "The following is a list of new Linux kernel commit messages. Concisely summarize what changed and why, grouped by subsystem, in English, within 10 lines." < messages.txt > summary.md; then
+            cat summary.md
+            exit 1
+          fi
+          cat summary.md
 
       - name: Notify
-        if: steps.sync.outputs.old != steps.sync.outputs.new
+        if: ${{ !cancelled() && steps.collect.outcome == 'success' }}
         run: |
           {
             echo "@${{ github.repository_owner }}"
             echo
-            cat summary.md
+            if [ "${{ steps.summarize.outcome }}" = "success" ]; then
+              cat summary.md
+            else
+              echo "> Summary failed. See ${{ github.server_url }}/$REPO/actions/runs/${{ github.run_id }}"
+            fi
             echo
             echo "<details><summary>Commits ($(wc -l < titles.txt))</summary>"
             echo
